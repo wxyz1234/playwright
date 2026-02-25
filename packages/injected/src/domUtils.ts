@@ -109,13 +109,17 @@ export function isElementStyleVisibilityVisible(element: Element, style?: CSSSty
 }
 
 // Describes the element's position relative to the viewport
-// 'visible' - element is at least partially within the viewport
+// 'visible' - element is at least partially within the viewport and not occluded
+// 'visible:occluded' - element is in viewport but covered by another element
 // 'offscreen:above' - element is completely above the viewport
 // 'offscreen:below' - element is completely below the viewport
 // 'offscreen:left' - element is completely to the left of the viewport
 // 'offscreen:right' - element is completely to the right of the viewport
 // 'offscreen:above-left', 'offscreen:above-right', etc. - element is in a corner
-export type ViewportPosition = 'visible' | `offscreen:${string}`;
+export type ViewportPosition = 'visible' | 'visible:occluded' | `offscreen:${string}`;
+
+// Tags that never form a visible occluding overlay (script, style, etc.)
+const NON_OCCLUDING_TAG_NAMES = new Set<string>(['SCRIPT', 'STYLE', 'LINK', 'META', 'HEAD', 'NOSCRIPT', 'TEMPLATE']);
 
 export type Box = {
   visible: boolean;
@@ -141,6 +145,14 @@ export type MainFrameViewport = { offsetX: number, offsetY: number, width: numbe
 export function computeViewportPosition(rect: DOMRect | undefined, element: Element, mainFrameViewport?: MainFrameViewport): ViewportPosition | undefined {
   if (!rect || (rect.width === 0 && rect.height === 0))
     return undefined;
+
+  // 1. 无关 tag（script/style/meta 等）直接返回 undefined
+  if (NON_OCCLUDING_TAG_NAMES.has(element.nodeName))
+    return undefined;
+
+  // 2. 利用原生 checkVisibility：不可见直接视为被遮挡
+  if (typeof element.checkVisibility === 'function' && !element.checkVisibility())
+    return 'visible:occluded';
 
   const win = element.ownerDocument?.defaultView;
   if (!win)
@@ -190,8 +202,21 @@ export function computeViewportPosition(rect: DOMRect | undefined, element: Elem
   const intersectsVertically = elementBottom > viewportTop && elementTop < viewportBottom;
 
   // Element is at least partially within the viewport
-  if (intersectsHorizontally && intersectsVertically)
+  if (intersectsHorizontally && intersectsVertically) {
+    // 3. elementFromPoint 遮挡检查：仅对视口内且有尺寸的元素执行
+    const doc = element.ownerDocument;
+    if (doc) {
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      const topEl = doc.elementFromPoint(centerX, centerY);
+      // 如果元素超大，导致centerX/centerY 超出视口，则会强制不视为遮挡，可能会导致部分遮挡的元素被误判为可见，不过结果可接受
+      // 有时候父元素过大会导致子元素被遮挡，不过结果可接受
+      if (topEl !== null && topEl !== element && !element.contains(topEl)) {
+        return 'visible:occluded';
+      }
+    }
     return 'visible';
+  }
 
   // Determine the direction(s) where the element is offscreen
   const directions: string[] = [];
